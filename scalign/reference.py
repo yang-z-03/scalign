@@ -72,7 +72,8 @@ class index_object_handler:
 
 
 class reference:
-    """Reference atlas
+    """
+    Reference atlas
 
     This is the core export class of `scalign`. It loads the reference atlas from a directory.
     At present, this package do not contain methods to building a reference dump automatically,
