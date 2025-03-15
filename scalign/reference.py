@@ -237,9 +237,91 @@ class reference:
         scvi_epoch_reduction = 3,
         retrain = False,
         landmark_reduction = 60,
-        landmark_loss_weight = 0.01,
-        random_seed = 42
+        landmark_loss_weight = 0.01
     ):
+        """
+        Query the reference atlas with a dataset
+        
+        Parameters
+        ----------
+
+        query : anndata.AnnData
+            The query dataset to be aligned. The variable identifier will be mapped to the reference
+            atlas by the specified variable metadata column (in `reference(key_atlas_var = ...)`).
+            This column in the atlas metadata of genes will match the query dataset's metadata column
+            specified by `key_var`. If `key_var` is not specified, the query dataset's variable names
+            will be used as identifier.
+
+            The query dataset **must** have unique variable names and observation names. Otherwise
+            the program will raise an error. You can use `index.is_unique` to check this.
+
+        batch_key : str
+            The observation metadata key specifying sample batches. This will be used to correct
+            batch effect using `scvi` model. If not specified, the program will generate a obs
+            slot named `batch` and assign all samples to the same batch. Note that if you have
+            an observation metadata column named `batch`, it will be overwritten.
+
+        key_var : str
+            The variable metadata key specifying the gene names. This should match the key selected
+            in the atlas (by default, a list of ENSEMBL IDs). If not specified, the program will use
+            the variable names. You should make sure that the contents in this column are unique.
+            After the alignment, the variable names will be transformed to the same as the atlas.
+            The original variable names will be stored in `.index` slot. You should keep a copy of
+            that if you need them thereafter.
+        
+        key_query_latent : str
+            The obsm key to store scVI latent space. If there is already a key with the same name,
+            the calculation of scVI components will skip, and the data inside the slot will be used
+            directly as the scVI latent space.
+        
+        key_query_embeddings : str
+            The obsm key to store UMAP embeddings. This embeddings will *mostly* share the same 
+            structure as the reference atlas. Since the exact UMAP model is used to transform the
+            latent space. If `retrain` is set to `False`, the UMAP will just serve as a prediction
+            model to transform between dimensions without training on them. This is rather fast,
+            but may introduce errors in the predicted embeddings (since the model have not seen
+            the data totally during its training). Non-parametric model do not support retraining,
+            and can only be used as a prediction model. 
+
+            Parametric UMAP models have the capability to be retrained with new data. This will help
+            the new data points better integrated into the atlas, and revealing more accurate
+            alignment. However, the atlas embedding is somewhat affected by the new ones. Though we
+            use landmarking points to help preserve the original structure, there may be some 
+            small differences between the new atlas and the original one.
+
+            If there is already a key with the same name, UMAP embedding calculation will be skipped.
+
+        scvi_epoch_reduction : int
+            Since the scVI model has been trained, we just need a few epochs to adapt it to the new
+            data. The epochs may be less than what scVI expected to be. This saves a lot of time when
+            running on CPU machines without reducing the performance too much. By default, the 
+            reduction ratio is set to 4.
+        
+        retrain : bool
+            Whether to retrain the model. This is only supported for parametric model.
+        
+        landmark_reduction : int
+            Partition to randomly select as landmarking points. The trainer will select 1 out of 
+            N points from the original atlas to help make the overall space not change dramatically.
+            The less the reduction ratio is, the more samples from the original atlas will be 
+            used in retraining. By default is set to 60.
+        
+        landmark_loss_weight : float
+            The weight of the landmark loss. By default 0.01.
+
+        Returns
+        -------
+        anndata.AnnData
+
+            The modified anndata object. with the following slots set:
+            * `obs`: `batch`
+            * `var`: `.index`, `var_names`
+            * `obsm`: `key_query_latent`, `key_query_embeddings`
+            * `uns`: `.align`
+
+            These changes is made inplace, however, the modified object is still
+            returned for convenience.
+        """
 
         assert query.var.index.is_unique
         assert query.obs.index.is_unique
@@ -312,7 +394,7 @@ class reference:
                 )
                 
                 # set landmark loss weight and continue training our parametric umap model.
-                self.embedder.landmark_loss_weight = 0.01 # by default 1
+                self.embedder.landmark_loss_weight = landmark_loss_weight # by default 1
                 self.embedder.fit(
                     finetune, landmark_positions = landmarks
                 )
@@ -357,9 +439,6 @@ class reference:
         query.var_names = [str(x) for x in query.var_names.tolist()]
         return query
 
-    
-    def kernel_gaussian(x):
-        return math.exp(-0.5 * np.sqrt(x)) / (2 * math.pi)
     
     def density(
         self, query, 
@@ -413,6 +492,56 @@ class reference:
         width = 5, height = 5, dpi = 100, elegant = False,
         save = None
     ):
+        """
+        Plot mapping density
+
+        This function is a helper to plot alignment density. Either be shown to the interactive
+        console, or save to disk files.
+
+        Parameters
+        ----------
+
+        query : anndata.AnnData
+            The mapped query set. Must run with `reference.query()` beforehand. Since this function
+            requires the data to contain `.uns['.align']` and `.obsm['umap']`.
+        
+        stratification : Literal['query', 'atlas']
+            The plot function will only show one in the two cases. Either coloring a categorical 
+            metadata from the atlas, or a metadata from the query set. The legend will automatically
+            show for each.
+        
+        add_outline : bool
+            Whether to add an outline to the atlas embedding region. This may stress the atlas boundary.
+        
+        legend_col : int
+            Number of columns to display legend markers. Set to an adequate number for aethesty
+            when the groupings have a lot of possible values.
+        
+        outline_color : str
+            A named matplotlib color (or hex code) to the outline
+        
+        width : int
+            Width of figure
+        
+        height : int
+            Height of figure
+        
+        dpi : int
+            DPI. If saving to vector graphics (e.g. PDF, SVG etc.), you should note that some part of
+            the graphics is rasterized by default to reduce object size. The resolution of such 
+            rasterized objects is still affected by DPI.
+        
+        elegant : int
+            Show no boundary.
+        
+        save : str
+            If set to `None`, the plot will be displayed using `matplotlib.pyplot.show()`. Otherwise,
+            set the parameter to a valid file name to save the image to disk.
+
+        Returns
+        -------
+        None
+        """
 
         # we expect a colors.tsv exist under the folder, and specify two columns
         # strat and color. where strat corresponds to the values of the type_annotation
