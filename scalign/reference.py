@@ -24,10 +24,7 @@ import matplotlib.patheffects as mpe
 ftprop = fm.FontProperties(family = 'sans')
 ftboldprop = fm.FontProperties(family = 'sans', weight = 'bold')
 
-def set_font(
-    normal = "/home/data/yangzhen/fonts/arial.ttf", 
-    bold = "/home/data/yangzhen/fonts/arial-b.ttf"
-):
+def set_font(normal, bold):
     ftprop = fm.FontProperties(fname = normal)
     ftboldprop = fm.FontProperties(fname = bold)
 
@@ -75,7 +72,7 @@ class reference:
     """
     Reference atlas
 
-    This is the core export class of `scalign`. It loads the reference atlas from a directory.
+    This is the core export class of ``scalign``. It loads the reference atlas from a directory.
     At present, this package do not contain methods to building a reference dump automatically,
     this will be added in later versions. 
 
@@ -83,22 +80,22 @@ class reference:
     ----------
 
     path : str
-        The directory to the reference atlas. This should always contains a `,etadata.h5ad`
-        file and a `scvi` directory, and contain either or both `embedder.pkl` and / or 
-        `parametric` directory. These two store the non-parametric and parametric UMAP embedder
-        respectively. Parametric UMAP embedder requires `keras >= 3.1` and `tensorflow >= 2.0`
+        The directory to the reference atlas. This should always contains a ``,etadata.h5ad``
+        file and a ``scvi`` directory, and contain either or both ``embedder.pkl`` and / or 
+        ``parametric`` directory. These two store the non-parametric and parametric UMAP embedder
+        respectively. Parametric UMAP embedder requires ``keras >= 3.1`` and ``tensorflow >= 2.0``
         as additional dependencies, and can run much faster if you have configured valid GPUs.
         The non-parametric UMAP embedder serves as a fallback point and runs faster than the
         parametric model when no GPU is installed.
 
     key_atlas_var : str
         The matching gene metadata in the atlas to the query set. You may pick an identifier that
-        your query set contains. It is `.ensembl` by default indicating a column of ENSEMBL IDs
-        you should set `query(key_var = '...')` to the corresponding ENSEMBL IDs as this.
+        your query set contains. It is ``.ensembl`` by default indicating a column of ENSEMBL IDs
+        you should set ``query(key_var = '...')`` to the corresponding ENSEMBL IDs as this.
 
     use_parametric_if_available : bool
-        If set to `True`, this will use parametric model if tensorflow is installed.
-        If set to `False`, you may force the aligner to use the non-parametric one.
+        If set to ``True``, this will use parametric model if tensorflow is installed.
+        If set to ``False``, you may force the aligner to use the non-parametric one.
     """
 
     # load the reference dataset from path.
@@ -158,7 +155,7 @@ class reference:
             except Exception as e:
                 print(f'[!] your environment is not available to load parametric model.')
                 print(f'[!] will fallback to non-parametric model. ')
-                print(f'[!] the parametric model requires the installation of `keras >= 3`, `tensorflow >= 2.0`.')
+                print(f'[!] the parametric model requires the installation of ``keras >= 3``, ``tensorflow >= 2.0``.')
                 self.use_parametric = False
                 if not self.has_embedder_np:
                     print(f'[!] fallback non-parametric model do not exist. check your installation.')
@@ -247,26 +244,26 @@ class reference:
 
         query : anndata.AnnData
             The query dataset to be aligned. The variable identifier will be mapped to the reference
-            atlas by the specified variable metadata column (in `reference(key_atlas_var = ...)`).
+            atlas by the specified variable metadata column (in ``reference(key_atlas_var = ...)``).
             This column in the atlas metadata of genes will match the query dataset's metadata column
-            specified by `key_var`. If `key_var` is not specified, the query dataset's variable names
+            specified by ``key_var``. If ``key_var`` is not specified, the query dataset's variable names
             will be used as identifier.
 
             The query dataset **must** have unique variable names and observation names. Otherwise
-            the program will raise an error. You can use `index.is_unique` to check this.
+            the program will raise an error. You can use ``index.is_unique`` to check this.
 
         batch_key : str
             The observation metadata key specifying sample batches. This will be used to correct
-            batch effect using `scvi` model. If not specified, the program will generate a obs
-            slot named `batch` and assign all samples to the same batch. Note that if you have
-            an observation metadata column named `batch`, it will be overwritten.
+            batch effect using ``scvi`` model. If not specified, the program will generate a obs
+            slot named ``batch`` and assign all samples to the same batch. Note that if you have
+            an observation metadata column named ``batch``, it will be overwritten.
 
         key_var : str
             The variable metadata key specifying the gene names. This should match the key selected
             in the atlas (by default, a list of ENSEMBL IDs). If not specified, the program will use
             the variable names. You should make sure that the contents in this column are unique.
             After the alignment, the variable names will be transformed to the same as the atlas.
-            The original variable names will be stored in `.index` slot. You should keep a copy of
+            The original variable names will be stored in ``.index`` slot. You should keep a copy of
             that if you need them thereafter.
         
         key_query_latent : str
@@ -277,7 +274,7 @@ class reference:
         key_query_embeddings : str
             The obsm key to store UMAP embeddings. This embeddings will *mostly* share the same 
             structure as the reference atlas. Since the exact UMAP model is used to transform the
-            latent space. If `retrain` is set to `False`, the UMAP will just serve as a prediction
+            latent space. If ``retrain`` is set to ``False``, the UMAP will just serve as a prediction
             model to transform between dimensions without training on them. This is rather fast,
             but may introduce errors in the predicted embeddings (since the model have not seen
             the data totally during its training). Non-parametric model do not support retraining,
@@ -314,10 +311,11 @@ class reference:
         anndata.AnnData
 
             The modified anndata object. with the following slots set:
-            * `obs`: `batch`
-            * `var`: `.index`, `var_names`
-            * `obsm`: `key_query_latent`, `key_query_embeddings`
-            * `uns`: `.align`
+            
+            * ``.obs``: ``batch``
+            * ``.var``: ``.index``, ``var_names``
+            * ``.obsm``: ``key_query_latent``, ``key_query_embeddings``
+            * ``.uns``: ``.align``
 
             These changes is made inplace, however, the modified object is still
             returned for convenience.
@@ -465,7 +463,7 @@ class reference:
         query_hue = None,
         query_hue_order = None,
         query_default_color = 'black',
-        query_alpha = 0.75,
+        query_alpha = 0.5,
         query_palette = 'hls',
         query_rasterize = True,
 
@@ -483,11 +481,11 @@ class reference:
         contour_default_color = 'black',
         contour_palette = 'hls',
         contour_alpha = 1,
-        contour_levels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-        contour_bw = 0.25,
+        contour_levels = 10,
+        contour_bw = 0.5,
 
         add_outline = False,
-        legend_col = 2,
+        legend_col = 1,
         outline_color = 'black',
         width = 5, height = 5, dpi = 100, elegant = False,
         save = None
@@ -502,45 +500,113 @@ class reference:
         ----------
 
         query : anndata.AnnData
-            The mapped query set. Must run with `reference.query()` beforehand. Since this function
-            requires the data to contain `.uns['.align']` and `.obsm['umap']`.
+            The mapped query set. Must run with ``reference.query()`` beforehand. Since this function
+            requires the data to contain ``.uns['.align']`` and ``.obsm['umap']``.
         
-        stratification : Literal['query', 'atlas']
+        stratification : Literal['query', 'atlas'] = 'query'
             The plot function will only show one in the two cases. Either coloring a categorical 
             metadata from the atlas, or a metadata from the query set. The legend will automatically
             show for each.
         
-        add_outline : bool
+        add_outline : bool = False
             Whether to add an outline to the atlas embedding region. This may stress the atlas boundary.
         
-        legend_col : int
+        legend_col : int = 1
             Number of columns to display legend markers. Set to an adequate number for aethesty
             when the groupings have a lot of possible values.
         
+        atlas_ptsize, query_ptsize : float = (2, 8)
+            The point size of the atlas basis plot and the query scatter. Typically the query data
+            points should be plotted larger than the atlas, since the atlas contains more cells.
+        
+        atlas_hue, query_hue : str = None
+            The categorical variable specified for groupings of the atlas or the query. Note that 
+            only the selected layer by ``stratification`` will be plotted, since plotting both
+            the data with colors will obfuscate the graph. This variable must exist within the
+            ``obs`` slot of the corresponding anndata. If set to `None`, we will plot the data
+            points in the same color specified by ``atlas_default_color`` or ``query_default_color``.
+        
+        atlas_hue_order, query_hue_order : list[str] = None
+            Specify the order of hue variable. This is useful in combination with the manually
+            specified palette to determine exact color used.
+        
+        atlas_default_color, query_default_color : str = ('#e0e0e0', 'black')
+            A named matplotlib color (or hex code) for the atlas scatter and the query scatter if
+            not colored by category. If ``atlas_hue`` or ``query_hue`` is not ``None``, the value
+            of this parameter will be ignored, and the coloring of the graph is then specified
+            by ``atlas_palette`` and ``query_palette``.
+        
+        atlas_alpha, query_alpha : float = (1, 0.5)
+            The transparency of data points.
+        
+        atlas_palette, query_palette : str | list[str] = 'hls'
+            The color palette. Could either be a string indicating named palette names (or following
+            the syntax of color palette names by ``seaborn``), or a list of color strings specifying
+            exact colors (and their order). If the length of the colors do not meet the length of
+            categorical values, the automatic palette cycling rule will be applied by ``matplotlib``.
+
+        atlas_rasterize, query_rasterize : bool = True
+            Whether to rasterize the scatter plot. We strongly recommend setting these values to
+            ``True``, for an atlas of a large scale will blow up the graphic object, resulting in
+            ridiculously large vector formats and slow performance.
+        
+        atlas_annotate, query_annotate : bool = True
+            If a ``hue`` is specified, whether to mark the categories onto the map.
+        
+        atlas_annotate_style, query_annotate_style : Literal['index', 'label'] = 'index'
+            The markers of categories on map. ``index`` will mark a circled index according to the
+            legend marker, and ``label`` will mark the category text.
+        
+        atlas_annotate_foreground, query_annotate_foreground : str = 'black'
+            A named matplotlib color (or hex code). Foreground color to the annotated text.
+        
+        atlas_annotate_stroke, query_annotate_stroke : str = 'white'
+            A named matplotlib color (or hex code). Stroke color to the annotated text.
+
+        atlas_legend, query_legend : bool = True
+            Whether to show the categorical legend.
+        
+        contour_fill : bool = False
+            Whether to fill the isoheight contours with a color gradient. If this is set to ``True``,
+            the value of ``contour_linewidth`` will be ignored.
+
+        contour_linewidth : float = 0.8
+            The line width of the non-filled isoheight contours.
+        
+        contour_levels : int | list[float] = 10
+            The levels of the contours. If a single integer value is provided, the whole range is
+            splitted evenly to match the levels (e.g. setting to ``5`` will have the same effects
+            as ``[0.2, 0.4, 0.6, 0.8]``), or specify a list of levels to plot the contour manually.
+        
+        contour_bw : float = 0.5
+            The larger the parameter is, the smoother the contours will be.
+
         outline_color : str
             A named matplotlib color (or hex code) to the outline
         
-        width : int
+        width : int = 5
             Width of figure
         
-        height : int
+        height : int = 5
             Height of figure
         
-        dpi : int
+        dpi : int = 100
             DPI. If saving to vector graphics (e.g. PDF, SVG etc.), you should note that some part of
             the graphics is rasterized by default to reduce object size. The resolution of such 
             rasterized objects is still affected by DPI.
         
-        elegant : int
+        elegant : int = False
             Show no boundary.
         
-        save : str
-            If set to `None`, the plot will be displayed using `matplotlib.pyplot.show()`. Otherwise,
+        save : str = None
+            If set to ``None``, the plot will be displayed using ``matplotlib.pyplot.show()``. Otherwise,
             set the parameter to a valid file name to save the image to disk.
 
         Returns
         -------
-        None
+        None | Figure
+            If ``save`` is ``None``, return the plotting figure in matplotlib format.
+            If ``save`` is set, will write the image to disk and return ``None``.
         """
 
         # we expect a colors.tsv exist under the folder, and specify two columns
@@ -716,6 +782,8 @@ class reference:
             plt.tight_layout()
             plt.savefig(save)
             plt.close()
+            return None
         
-        else: plt.show()
-        pass
+        else: 
+            plt.show()
+            return fig
