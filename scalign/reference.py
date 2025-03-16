@@ -7,10 +7,9 @@ import math
 import numpy as np
 
 import pickle
-import scanpy
-import scvi
 import pandas as pd
 
+import matplotlib as mpl
 from matplotlib import cm
 import matplotlib.patches as mpatches
 import matplotlib.text as mtext
@@ -19,6 +18,7 @@ import seaborn as sb
 import matplotlib.pyplot as plt
 from matplotlib import font_manager as fm
 import matplotlib.patheffects as mpe
+from matplotlib.colors import ListedColormap as listedcm
 
 
 ftprop = fm.FontProperties(family = 'sans')
@@ -52,16 +52,21 @@ class index_object_handler:
         center = 0.5 * width - 0.5 * x0, 0.5 * height - 0.5 * y0
         patch = mpatches.Ellipse(
             xy = center, 
-            width = (height + y0) * 1.8,
-            height = (height + y0) * 1.8,
+            width = (height + y0) * 1.5,
+            height = (height + y0) * 1.5,
             color = self.color
         )
 
         annot = mtext.Text(
-            x = center[0], y = center[1] - (height + y0) * 0.2, text = str(self.index), color = 'black',
+            x = center[0], y = center[1] - (height + y0) * 0.1, text = str(self.index), color = 'black',
             va = 'center', ha = 'center', fontproperties = ftboldprop,
-            transform = handlebox.get_transform()
+            transform = handlebox.get_transform(), size = 8
         )
+        
+        annot.set_path_effects([
+            mpe.Stroke(linewidth = 2, foreground = 'white'),
+            mpe.Normal()
+        ])
         
         handlebox.add_artist(patch)
         handlebox.add_artist(annot)
@@ -80,7 +85,7 @@ class reference:
     ----------
 
     path : str
-        The directory to the reference atlas. This should always contains a ``,etadata.h5ad``
+        The directory to the reference atlas. This should always contains a ``metadata.h5ad``
         file and a ``scvi`` directory, and contain either or both ``embedder.pkl`` and / or 
         ``parametric`` directory. These two store the non-parametric and parametric UMAP embedder
         respectively. Parametric UMAP embedder requires ``keras >= 3.1`` and ``tensorflow >= 2.0``
@@ -96,24 +101,43 @@ class reference:
     use_parametric_if_available : bool
         If set to ``True``, this will use parametric model if tensorflow is installed.
         If set to ``False``, you may force the aligner to use the non-parametric one.
+    
+    use_expression_if_available : str
+        If the expression data of the atlas is available, try to load them into the model. One can
+        build a reference atlas with gene expression quantification within them by supplying a 
+        log-normalized matrix. This will enable more analysis and visualization capacity of the
+        atlas mapper. However, if the atlas is relatively large, this make take extra long time to
+        load and more disk space (as well as working memory). For a lite distribution of the atlas,
+        one do not need the expression data, and the mapping program takes an average of 5 Gb memory
+        to perform its job for a 1,250,000 cell atlas. (1.25 M cells) This is considered a large
+        atlas already, but is capable to analysis on a single laptop computer. However, the expression
+        matrix of atlas at such size may become at least ~150 Gb. A full distribution that contains 
+        such data should take about 160 Gb disk space, and nearly 200 Gb memory to load them
+        successfully. So the user should check the configuration of their machine before turning
+        the switch on. Otherwise it will crash the program.
     """
 
     # load the reference dataset from path.
     def __init__(
         self, path,
         key_atlas_var = '.ensembl',
-        use_parametric_if_available = True
+        use_parametric_if_available = True,
+        use_expression_if_available = False
     ):
 
+        import scanpy
+        
         self.error = False
-        self.has_embedder_np = True
-        self.has_embedder_p = True
-        self.use_parametric = False
+        self._has_embedder_np = True
+        self._has_embedder_p = True
+        self._use_parametric = False
+        self._has_expression = False
         
         f_scvi = os.path.join(path, 'scvi', 'model.pt')
         f_meta = os.path.join(path, 'metadata.h5ad')
         f_emb = os.path.join(path, 'embedder.pkl')
         f_param = os.path.join(path, 'parametric', 'model.pkl')
+        f_expr = os.path.join(path, 'expression.h5ad')
 
         if not os.path.exists(f_scvi):
             print(f'[!] scvi model not found. at {f_scvi}')
@@ -127,13 +151,13 @@ class reference:
 
         if not os.path.exists(f_emb):
             print(f'[!] this reference set do not have a non-parametric umap embedder.')
-            self.has_embedder_np = False
+            self._has_embedder_np = False
 
         if not os.path.exists(f_param):
             print(f'[!] this reference set do not have a parametric umap embedder.')
-            self.has_embedder_p = False
+            self._has_embedder_p = False
 
-        if not (self.has_embedder_p or self.has_embedder_np):
+        if not (self._has_embedder_p or self._has_embedder_np):
             print(f'[!] no embedder found.')
             self.error = True
             return
@@ -141,14 +165,14 @@ class reference:
         # we will use the parametric embedder if there is one.
         else:
             if use_parametric_if_available: 
-                self.use_parametric = self.has_embedder_p
-            else: self.use_parametric = False
+                self._use_parametric = self._has_embedder_p
+            else: self._use_parametric = False
 
         # load the umap transformer
-        if self.use_parametric:
+        if self._use_parametric:
             try:
                 from scalign_umap.parametric_umap import load_pumap
-                self.embedder = load_pumap(
+                self._embedder = load_pumap(
                     os.path.join(path, 'parametric')
                 )
                 
@@ -156,72 +180,194 @@ class reference:
                 print(f'[!] your environment is not available to load parametric model.')
                 print(f'[!] will fallback to non-parametric model. ')
                 print(f'[!] the parametric model requires the installation of ``keras >= 3``, ``tensorflow >= 2.0``.')
-                self.use_parametric = False
-                if not self.has_embedder_np:
+                self._use_parametric = False
+                if not self._has_embedder_np:
                     print(f'[!] fallback non-parametric model do not exist. check your installation.')
                     self.error = True
                     return
         
-        if not self.use_parametric:
+        if not self._use_parametric:
             with open(f_emb, 'rb') as f:
-                self.embedder = pickle.load(f)
+                self._embedder = pickle.load(f)
 
         # read the atlas metadata.
-        self.metadata = scanpy.read(f_meta)
+        self._metadata = scanpy.read(f_meta)
+
+        if os.path.exists(f_expr) and use_expression_if_available:
+            print(f'[*] loading the expression matrix into memory ...')
+            self._expression = scanpy.read(f_expr)
+            if self._expression.n_obs != self._metadata.n_obs or \
+                self._expression.n_vars != self._metadata.n_vars:
+                print(f'[!] the size of metadata and expression matrix do not match.')
+                print(f'[!] you should check if the atlas installation is corrupted.')
+                self.error = True
+                del self._expression
+                return
+            
+            self._has_expression = True
+
         self.directory = path
         self.scvi = os.path.join(path, 'scvi')
 
         # check mandatory metadata
-        print(f'[*] load reference atlas of size [obs] {self.metadata.n_obs} * [var] {self.metadata.n_vars}')
-        assert 'latent' in self.metadata.uns.keys()
-        assert 'precomputed' in self.metadata.uns['latent'].keys()
-        assert 'latent' in self.metadata.uns['latent'].keys()
-        assert self.metadata.uns['latent']['precomputed'] in self.metadata.obsm.keys()
-        assert self.metadata.obsm[self.metadata.uns['latent']['precomputed']].shape[1] == \
-            self.metadata.uns['latent']['latent']
+        print(f'[*] load reference atlas of size [obs] {self._metadata.n_obs} * [var] {self._metadata.n_vars}')
+        assert 'latent' in self._metadata.uns.keys()
+        assert 'precomputed' in self._metadata.uns['latent'].keys()
+        assert 'latent' in self._metadata.uns['latent'].keys()
+        assert self._metadata.uns['latent']['precomputed'] in self._metadata.obsm.keys()
+        assert self._metadata.obsm[self._metadata.uns['latent']['precomputed']].shape[1] == \
+            self._metadata.uns['latent']['latent']
         
-        if self.use_parametric:
-            assert 'parametric' in self.metadata.uns.keys()
-            assert 'landmark' in self.metadata.uns.keys()
-            assert 'precomputed' in self.metadata.uns['parametric'].keys()
-            assert 'latent' in self.metadata.uns['parametric'].keys()
-            assert 'dimension' in self.metadata.uns['parametric'].keys()
-            assert self.metadata.uns['parametric']['precomputed'] in self.metadata.obsm.keys()
-            assert self.metadata.obsm[self.metadata.uns['parametric']['precomputed']].shape[1] == \
-                self.metadata.uns['parametric']['dimension']
-            assert self.metadata.uns['parametric']['latent'] == self.metadata.uns['latent']['latent']
+        if self._use_parametric:
+            assert 'parametric' in self._metadata.uns.keys()
+            assert 'landmark' in self._metadata.uns.keys()
+            assert 'precomputed' in self._metadata.uns['parametric'].keys()
+            assert 'latent' in self._metadata.uns['parametric'].keys()
+            assert 'dimension' in self._metadata.uns['parametric'].keys()
+            assert self._metadata.uns['parametric']['precomputed'] in self._metadata.obsm.keys()
+            assert self._metadata.obsm[self._metadata.uns['parametric']['precomputed']].shape[1] == \
+                self._metadata.uns['parametric']['dimension']
+            assert self._metadata.uns['parametric']['latent'] == self._metadata.uns['latent']['latent']
         else:
-            assert 'umap' in self.metadata.uns.keys()
-            assert 'precomputed' in self.metadata.uns['umap'].keys()
-            assert 'latent' in self.metadata.uns['umap'].keys()
-            assert 'dimension' in self.metadata.uns['umap'].keys()
-            assert self.metadata.uns['umap']['precomputed'] in self.metadata.obsm.keys()
-            assert self.metadata.obsm[self.metadata.uns['umap']['precomputed']].shape[1] == \
-                self.metadata.uns['umap']['dimension']
-            assert self.metadata.uns['umap']['latent'] == self.metadata.uns['latent']['latent']
+            assert 'umap' in self._metadata.uns.keys()
+            assert 'precomputed' in self._metadata.uns['umap'].keys()
+            assert 'latent' in self._metadata.uns['umap'].keys()
+            assert 'dimension' in self._metadata.uns['umap'].keys()
+            assert self._metadata.uns['umap']['precomputed'] in self._metadata.obsm.keys()
+            assert self._metadata.obsm[self._metadata.uns['umap']['precomputed']].shape[1] == \
+                self._metadata.uns['umap']['dimension']
+            assert self._metadata.uns['umap']['latent'] == self._metadata.uns['latent']['latent']
 
         # we should manually ensure the n and k is both unduplicated.
-        assert key_atlas_var in self.metadata.var.keys()
-        var_keys = self.metadata.var[key_atlas_var].tolist()
-        var_names = self.metadata.var_names.tolist()
+        assert key_atlas_var in self._metadata.var.keys()
+        var_keys = self._metadata.var[key_atlas_var].tolist()
+        var_names = self._metadata.var_names.tolist()
         converter = {}
         for n, k in zip(var_names, var_keys):
             converter[k] = n
-        self.converter = converter
+        self._converter = converter
 
         pass
 
 
+    @property
+    def observations(self):
+        """
+        Readonly observation metadata of the atlas
+        """
+        return self._metadata.obs
+
+
+    @property
+    def variables(self):
+        """
+        Readonly variable metadata of the atlas
+        """
+        return self._metadata.var
+    
+    
+    @property
+    def use_parametric(self):
+        """
+        Whether the atlas mapper use the parametric UMAP model. You may alter the 
+        ``use_parametric_if_available`` switch when creating the reference to inform that you prefer
+        a parametric model to be used. However, if you did not configure ``keras`` and ``tensorflow``
+        packages correctly, the program will automatically fallback to non-parametric model as a 
+        default. The actual model of use might not be what you expected, as you can check this
+        property to see which model is actually loaded and used.
+        """
+        return self._use_parametric
+    
+
+    @property
+    def use_expression(self):
+        """
+        Whether the atlas mapper load the expression matrix.
+        """
+        return self._has_expression
+    
+
+    @property
+    def expression(self):
+        """
+        Get the expression matrix in log normalized counts.
+        """
+        if self.use_expression:
+            return self._expression.X
+        else: 
+            print(f'[!] the model is not loaded with an expression matrix')
+            return None
+    
+    
+    @property
+    def converter(self):
+        """
+        The converter dictionary from the key specified in ``key_atlas_var`` corresponding in the
+        variable metadata to the atlas variable key. 
+        """
+        return self._converter
+    
+
+    @property
+    def epoch(self):
+        """
+        Number of epochs for each sample that came across when training.
+        """
+        return self._embedder.n_epochs
+    
+    @epoch.setter
+    def epoch(self, value):
+        self._embedder.n_epochs = value
+
+
+    @property
+    def reproduceable(self):
+        """
+        Whether the model is trained with a deterministic random state. Setting the random state
+        will make the training process reproduceable, but can only use 1 CPU cores during neighbor
+        finding. This random seed can not be changed after the model is built. So this field is
+        readonly. You can make a request to the atlas distributor if you would like a reproduceable model,
+        or to train a model with counts by yourself.
+
+        However, since the prediction process do not alter the model, you will still get reproduceable
+        results if you map the query dataset with ``retrain`` set to ``False``. Minor differences will
+        only occur if you retrain the model, and this won't change much since we apply an additional
+        loss trying to keep the atlas of the same shape.
+        """
+        return isinstance(self._embedder.random_state, int)
+
+    
+    def network_summary(self):
+        """
+        Print the network summary for a parametric model. This function will print an error text
+        if the model is loaded with non-parametric model.
+        """
+        if self.use_parametric:
+            self._embedder.parametric_model.summary()
+        else: print('[!] the atlas embedder is non-parametric.')
+
+    
+    def training_loss(self):
+        """
+        Get the training loss vector that recorded during the model's training and retraining
+        process. The original vector 
+        """
+        if self.use_parametric:
+            return self._embedder._history['loss']
+        else: print('[!] the atlas embedder is non-parametric.')
+
+    
     def __str__(self):
         if self.error:
             return 'Loading failed. Check your installation.'
         else:
             return '\n'.join([
-                f'An atlas of size [obs] {self.metadata.n_obs} * [var] {self.metadata.n_vars}. \n',
+                f'An atlas of size [obs] {self._metadata.n_obs} * [var] {self._metadata.n_vars}. \n',
                 f'              [use parametric]: {self.use_parametric}',
-                f'      [parametric model found]: {self.has_embedder_p}',
-                f'  [non-parametric model found]: {self.has_embedder_np}',
-                f'           [scvi latent space]: {self.metadata.uns["latent"]["latent"]}'
+                f'    [expression matrix loaded]: {self._has_expression}',
+                f'      [parametric model found]: {self._has_embedder_p}',
+                f'  [non-parametric model found]: {self._has_embedder_np}',
+                f'           [scvi latent space]: {self._metadata.uns["latent"]["latent"]}'
             ])
 
 
@@ -321,6 +467,8 @@ class reference:
             returned for convenience.
         """
 
+        import scvi
+
         assert query.var.index.is_unique
         assert query.obs.index.is_unique
 
@@ -376,10 +524,10 @@ class reference:
             if retrain:
                 
                 print(f'[>] retraining umap embedding ...')
-                latent = self.metadata.obsm[self.metadata.uns['latent']['precomputed']]
-                embeddings = self.metadata.obsm[self.metadata.uns['parametric']['precomputed']]
-                landmark_idx = self.metadata.uns['landmark'][
-                    0 : (len(self.metadata.uns['landmark']) // landmark_reduction)
+                latent = self._metadata.obsm[self._metadata.uns['latent']['precomputed']]
+                embeddings = self._metadata.obsm[self._metadata.uns['parametric']['precomputed']]
+                landmark_idx = self._metadata.uns['landmark'][
+                    0 : (len(self._metadata.uns['landmark']) // landmark_reduction)
                 ]
                 
                 # append the landmark points
@@ -392,21 +540,21 @@ class reference:
                 )
                 
                 # set landmark loss weight and continue training our parametric umap model.
-                self.embedder.landmark_loss_weight = landmark_loss_weight # by default 1
-                self.embedder.fit(
+                self._embedder.landmark_loss_weight = landmark_loss_weight # by default 1
+                self._embedder.fit(
                     finetune, landmark_positions = landmarks
                 )
 
                 print(f'[*] umap transforming in atlas latent space ...')
-                retrain_atlas = self.embedder.transform(latent)
-                self.metadata.obsm[self.metadata.uns['parametric']['precomputed']] = retrain_atlas
+                retrain_atlas = self._embedder.transform(latent)
+                self._metadata.obsm[self._metadata.uns['parametric']['precomputed']] = retrain_atlas
 
         if (not self.use_parametric) and retrain:
             print(f'[!] non-parametric umap do not support retraining!')
         
         if key_query_embeddings not in query.obsm.keys():
             print(f'[*] umap transforming querying dataset ...')
-            query_embeddings = self.embedder.transform(query_latent)
+            query_embeddings = self._embedder.transform(query_latent)
             query.obsm[key_query_embeddings] = query_embeddings
         
         else: print(f'[>] skipped calculation of umap, since it already exist.')
@@ -444,6 +592,11 @@ class reference:
 
         # atlas
         atlas_ptsize = 2,
+
+        atlas_color_mode = 'categorical',
+        key_atlas_var = '.name',
+        atlas_gene = None,
+
         atlas_hue = None,
         atlas_hue_order = None,
         atlas_default_color = '#e0e0e0',
@@ -459,6 +612,7 @@ class reference:
 
         # query plotting options
         key_query_embeddings = 'umap',
+        query_plot = True,
         query_ptsize = 8, 
         query_hue = None,
         query_hue_order = None,
@@ -474,6 +628,7 @@ class reference:
         query_legend = True,
 
         # contour plotting option.
+        contour_plot = True,
         contour_fill = False,
         contour_hue = None,
         contour_hue_order = None,
@@ -484,11 +639,11 @@ class reference:
         contour_levels = 10,
         contour_bw = 0.5,
 
-        add_outline = False,
         legend_col = 1,
+        add_outline = False,
         outline_color = 'black',
         width = 5, height = 5, dpi = 100, elegant = False,
-        save = None
+        title = 'Embeddings', save = None
     ):
         """
         Plot mapping density
@@ -511,59 +666,79 @@ class reference:
         add_outline : bool = False
             Whether to add an outline to the atlas embedding region. This may stress the atlas boundary.
         
+        outline_color : str = 'black'
+            A named matplotlib color (or hex code) to the outline
+
+        query_plot : bool = True
+            Whether to plot the scatter points from the query dataset. Note that this do not affect
+            the plotting of query labels or query legends if they are set to be plotted.
+
+        contour_plot : bool = True
+            Whether to plot the isoheight contours.
+        
         legend_col : int = 1
             Number of columns to display legend markers. Set to an adequate number for aethesty
             when the groupings have a lot of possible values.
         
-        atlas_ptsize, query_ptsize : float = (2, 8)
+        atlas_color_mode : str = Literal['categorical', 'expression']
+            How to plot the atlas color. If set to ``categorical``, this will require ``atlas_hue``
+            to set to a categorical metadata name. If set to ``expression``, this will plot the 
+            expression levels of a specified gene (with ``atlas_gene``) on the base UMAP. This requires
+            an expression matrix to be loaded into the atlas when creating it (by supplying
+            ``use_expression_if_available`` argument)
+
+        atlas_gene : str = None
+            The gene to plot. Must be valid name presented in ``.variables[key_atlas_var]``.
+        
+        ptsize : float = (atlas: 2, query: 8)
             The point size of the atlas basis plot and the query scatter. Typically the query data
             points should be plotted larger than the atlas, since the atlas contains more cells.
         
-        atlas_hue, query_hue : str = None
+        hue : str = None
             The categorical variable specified for groupings of the atlas or the query. Note that 
             only the selected layer by ``stratification`` will be plotted, since plotting both
             the data with colors will obfuscate the graph. This variable must exist within the
             ``obs`` slot of the corresponding anndata. If set to `None`, we will plot the data
             points in the same color specified by ``atlas_default_color`` or ``query_default_color``.
         
-        atlas_hue_order, query_hue_order : list[str] = None
+        order : list[str] = None
             Specify the order of hue variable. This is useful in combination with the manually
             specified palette to determine exact color used.
         
-        atlas_default_color, query_default_color : str = ('#e0e0e0', 'black')
+        default_color : str = ('#e0e0e0', 'black')
             A named matplotlib color (or hex code) for the atlas scatter and the query scatter if
             not colored by category. If ``atlas_hue`` or ``query_hue`` is not ``None``, the value
             of this parameter will be ignored, and the coloring of the graph is then specified
             by ``atlas_palette`` and ``query_palette``.
         
-        atlas_alpha, query_alpha : float = (1, 0.5)
+        alpha : float = (1, 0.5)
             The transparency of data points.
         
-        atlas_palette, query_palette : str | list[str] = 'hls'
+        palette : str | list[str] = 'hls'
             The color palette. Could either be a string indicating named palette names (or following
             the syntax of color palette names by ``seaborn``), or a list of color strings specifying
             exact colors (and their order). If the length of the colors do not meet the length of
             categorical values, the automatic palette cycling rule will be applied by ``matplotlib``.
 
-        atlas_rasterize, query_rasterize : bool = True
+        rasterize : bool = True
             Whether to rasterize the scatter plot. We strongly recommend setting these values to
             ``True``, for an atlas of a large scale will blow up the graphic object, resulting in
             ridiculously large vector formats and slow performance.
         
-        atlas_annotate, query_annotate : bool = True
+        annotate : bool = True
             If a ``hue`` is specified, whether to mark the categories onto the map.
         
-        atlas_annotate_style, query_annotate_style : Literal['index', 'label'] = 'index'
+        annotate_style : Literal['index', 'label'] = 'index'
             The markers of categories on map. ``index`` will mark a circled index according to the
             legend marker, and ``label`` will mark the category text.
         
-        atlas_annotate_foreground, query_annotate_foreground : str = 'black'
+        annotate_foreground : str = 'black'
             A named matplotlib color (or hex code). Foreground color to the annotated text.
         
-        atlas_annotate_stroke, query_annotate_stroke : str = 'white'
+        annotate_stroke : str = 'white'
             A named matplotlib color (or hex code). Stroke color to the annotated text.
 
-        atlas_legend, query_legend : bool = True
+        legend : bool = True
             Whether to show the categorical legend.
         
         contour_fill : bool = False
@@ -580,9 +755,6 @@ class reference:
         
         contour_bw : float = 0.5
             The larger the parameter is, the smoother the contours will be.
-
-        outline_color : str
-            A named matplotlib color (or hex code) to the outline
         
         width : int = 5
             Width of figure
@@ -597,6 +769,9 @@ class reference:
         
         elegant : int = False
             Show no boundary.
+
+        title : str = 'Embeddings'
+            Title of the plot, or ``None`` to hide the title.
         
         save : str = None
             If set to ``None``, the plot will be displayed using ``matplotlib.pyplot.show()``. Otherwise,
@@ -613,14 +788,11 @@ class reference:
         # strat and color. where strat corresponds to the values of the type_annotation
         # column of observation metadata.
         
-        min_long_edge_size = 4
-
-        # TODO: the base map should be updated if the query set retrained the atlas.
         do_parametric = query.uns['.align']['parametric']
-        slot = self.metadata.uns['parametric']['precomputed'] if do_parametric else \
-            self.metadata.uns['umap']['precomputed']
-        umap_x = self.metadata.obsm[slot][:,0]
-        umap_y = self.metadata.obsm[slot][:,1]
+        slot = self._metadata.uns['parametric']['precomputed'] if do_parametric else \
+            self._metadata.uns['umap']['precomputed']
+        umap_x = self._metadata.obsm[slot][:,0]
+        umap_y = self._metadata.obsm[slot][:,1]
         
         umapq_x = query.obsm[key_query_embeddings][:,0]
         umapq_y = query.obsm[key_query_embeddings][:,1]
@@ -644,15 +816,40 @@ class reference:
         # the atlas scatter plot
         ahue = None
         ahue_order = None
-        if atlas_hue is not None:
-            ahue = self.metadata.obs[query_hue].tolist()
-            ahue_order = self.metadata.obs[query_hue].value_counts().index.tolist() \
+        if atlas_hue is not None and atlas_color_mode == 'categorical':
+            ahue = self._metadata.obs[query_hue].tolist()
+            ahue_order = self._metadata.obs[query_hue].value_counts().index.tolist() \
                 if atlas_hue_order is None else atlas_hue_order
+        
+        aexpr = None
+        if atlas_color_mode == 'expression':
+            if not self.use_expression:
+                print(f'[!] this atlas is not loaded with expression data.')
+                print(f'[!] there will be no use to set atlas_color_mode = "expression"')
+            
+            else:
+                if not key_atlas_var in self.variables.keys():
+                    print(f'[!] {key_atlas_var} does not exist in variable keys')
+                elif not atlas_gene in self.variables[key_atlas_var].tolist():
+                    print(f'[!] gene {atlas_gene} do not exist in {key_atlas_var}.')
+                else:
+                    turbo = cm.get_cmap('turbo', 256)
+                    cmap = turbo(np.linspace(0, 1, 256))
+                    blanked = np.array([0, 0, 0, 1])
+                    # np.array([0.95, 0.95, 0.98, 1]) # a tint of bluish gray
+                    cmap[:5, :] = blanked
+                    cmap = listedcm(cmap)
+                    
+                    atlas_palette = cmap
+                    genes = self.variables[key_atlas_var].tolist()
+                    gene_col = genes.index(atlas_gene)
+                    aexpr = self.expression[:, gene_col].transpose().todense().tolist()[0]
+
         atlas_data['rasterized'] = atlas_rasterize
         sb.scatterplot(
             **atlas_data, s = atlas_ptsize,
             alpha = atlas_alpha, palette = atlas_palette, color = atlas_default_color,
-            hue = ahue, hue_order = ahue_order
+            hue = aexpr if aexpr is not None else ahue, hue_order = ahue_order
         )
     
         hue = None
@@ -665,20 +862,22 @@ class reference:
         
         if contour_hue is not None:
             chue = query.obs[contour_hue].tolist()
-            
-        sb.scatterplot(
-            x = umapq_x, y = umapq_y, hue = hue, hue_order = hue_order,
-            s = query_ptsize, color = query_default_color, legend = False, ax = axes, alpha = query_alpha,
-            palette = query_palette, rasterized = query_rasterize
-        )
-    
-        sb.kdeplot(
-            x = umapq_x, y = umapq_y, hue = chue, hue_order = contour_hue_order,
-            linewidths = contour_linewidth, bw_adjust = contour_bw, bw_method = 'scott',
-            fill = contour_fill, ax = axes, 
-            palette = contour_palette, color = contour_default_color, alpha = contour_alpha,
-            levels = contour_levels
-        )
+
+        if query_plot:
+            sb.scatterplot(
+                x = umapq_x, y = umapq_y, hue = hue, hue_order = hue_order,
+                s = query_ptsize, color = query_default_color, legend = False, ax = axes, alpha = query_alpha,
+                palette = query_palette, rasterized = query_rasterize
+            )
+
+        if contour_plot:
+            sb.kdeplot(
+                x = umapq_x, y = umapq_y, hue = chue, hue_order = contour_hue_order,
+                linewidths = contour_linewidth, bw_adjust = contour_bw, bw_method = 'scott',
+                fill = contour_fill, ax = axes, 
+                palette = contour_palette, color = contour_default_color, alpha = contour_alpha,
+                levels = contour_levels, legend = False
+            )
     
         plt.xticks(fontproperties = ftprop)
         plt.yticks(fontproperties = ftprop)
@@ -696,7 +895,9 @@ class reference:
             legend_colors = query_palette if isinstance(query_palette, list) else \
                 sb.color_palette(query_palette, as_cmap = True)(np.linspace(0, 1, len(legend_order)))
             
-        if (atlas_hue is not None) and stratification == 'atlas' and atlas_legend:
+        if (atlas_hue is not None) and stratification == 'atlas' and atlas_legend and \
+            atlas_color_mode == 'categorical':
+
             have_legend = 'atlas'
             legend_order = ahue_order
             legend_colors = atlas_palette if isinstance(atlas_palette, list) else \
@@ -721,12 +922,22 @@ class reference:
                 loc = 'upper left', bbox_to_anchor = (1, 1), frameon = False, prop = ftprop
             )
 
+        # plot the color bar if expression data is used.
+        if atlas_legend and (aexpr is not None):
+            cmap = atlas_palette
+            norm = mpl.colors.Normalize(vmin = np.min(aexpr), vmax = np.max(aexpr))
+
+            fig.colorbar(
+                cm.ScalarMappable(norm = norm, cmap = cmap),
+                ax = axes, orientation = 'horizontal', shrink = 0.25
+            )
+
         # plot the centre of all clusters on map
+
         do_annotate = 'none'
         annot_stype = None
         annot_stroke = None
         annot_foreground = None
-        annot_hue = None
         annot_x = None
         annot_y = None
         
@@ -735,7 +946,6 @@ class reference:
             annot_stype = query_annotate_style
             annot_stroke = query_annotate_stroke
             annot_foreground = query_annotate_foreground
-            annot_hue = hue
             annot_x = umapq_x
             annot_y = umapq_y
 
@@ -744,11 +954,10 @@ class reference:
             annot_stype = atlas_annotate_style
             annot_stroke = atlas_annotate_stroke
             annot_foreground = atlas_annotate_foreground
-            annot_hue = ahue
             annot_x = umap_x
             annot_y = umap_y
 
-        if have_legend in ['query', 'atlas']:
+        if do_annotate in ['query', 'atlas']:
             
             assert len(legend_colors) == len(legend_order)
             for legend_t, legend_c, legend_id in zip(
@@ -761,7 +970,8 @@ class reference:
                 center = np.mean(xs), np.mean(ys)
                 text = mtext.Text(
                     x = center[0], y = center[1], fontproperties = ftboldprop,
-                    text = str(legend_id + 1), color = annot_foreground,
+                    text = str(legend_id + 1) if annot_stype == 'index' else legend_t, 
+                    color = annot_foreground,
                     ha = 'center', va = 'center', size = 12
                 )
                 
@@ -769,6 +979,7 @@ class reference:
                     mpe.Stroke(linewidth = 3, foreground = annot_stroke),
                     mpe.Normal()
                 ])
+
                 axes.add_artist(text)
                 pass
 
@@ -776,7 +987,12 @@ class reference:
             plt.xticks(labels = [], ticks = [])
             plt.yticks(labels = [], ticks = [])
             plt.axis('off')
-            plt.title('Embeddings', fontproperties = ftprop)
+            show_title = atlas_gene if atlas_gene is not None else 'Embeddings'
+            if title is not None:
+                plt.title(
+                    title if title != 'Embeddings' else show_title, 
+                    fontproperties = ftboldprop
+                )
     
         if save is not None:
             plt.tight_layout()
