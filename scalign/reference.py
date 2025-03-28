@@ -3,8 +3,8 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import os
-import math
 import numpy as np
+import importlib
 
 import pickle
 import pandas as pd
@@ -20,13 +20,15 @@ from matplotlib import font_manager as fm
 import matplotlib.patheffects as mpe
 from matplotlib.colors import ListedColormap as listedcm
 
+import torch
 
-ftprop = fm.FontProperties(family = 'sans')
-ftboldprop = fm.FontProperties(family = 'sans', weight = 'bold')
+# Set default font family to 'sans-serif'
+plt.rcParams['font.family'] = 'sans-serif'
+# Specify a list of sans-serif fonts to try
+plt.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans', 'Verdana']
 
-def set_font(normal, bold):
-    ftprop = fm.FontProperties(fname = normal)
-    ftboldprop = fm.FontProperties(fname = bold)
+ftprop = fm.FontProperties(fname = '/home/yang-z/.local/share/fonts/Arial/arial.ttf')
+ftboldprop = fm.FontProperties(fname = '/home/yang-z/.local/share/fonts/Arial/arial-b.ttf', weight = 'bold')
 
 
 class index_object:
@@ -136,7 +138,7 @@ class reference:
         f_scvi = os.path.join(path, 'scvi', 'model.pt')
         f_meta = os.path.join(path, 'metadata.h5ad')
         f_emb = os.path.join(path, 'embedder.pkl')
-        f_param = os.path.join(path, 'parametric', 'model.pkl')
+        f_param = os.path.join(path, 'parametric')
         f_expr = os.path.join(path, 'expression.h5ad')
 
         if not os.path.exists(f_scvi):
@@ -161,37 +163,38 @@ class reference:
             print(f'[!] no embedder found.')
             self.error = True
             return
-
+        
         # we will use the parametric embedder if there is one.
         else:
             if use_parametric_if_available: 
                 self._use_parametric = self._has_embedder_p
             else: self._use_parametric = False
 
+        # read the atlas metadata.
+        self._metadata = scanpy.read(f_meta)
+
         # load the umap transformer
         if self._use_parametric:
             try:
-                from scalign_umap.parametric_umap import load_pumap
-                self._embedder = load_pumap(
-                    os.path.join(path, 'parametric')
-                )
+                from scalign.parametric import load_pumap
+                self._embedder = load_pumap(os.path.join(path, 'parametric'))
+
+                embeddings = np.load(os.path.join(path, 'parametric', 'embeddings.npy'))
+                self._metadata.obsm[self._metadata.uns['parametric']['precomputed']] = embeddings
                 
             except Exception as e:
                 print(f'[!] your environment is not available to load parametric model.')
                 print(f'[!] will fallback to non-parametric model. ')
-                print(f'[!] the parametric model requires the installation of ``keras >= 3``, ``tensorflow >= 2.0``.')
+                print(e)
                 self._use_parametric = False
                 if not self._has_embedder_np:
-                    print(f'[!] fallback non-parametric model do not exist. check your installation.')
+                    print(f'[!] fallback non-parametric model do not exist.')
                     self.error = True
                     return
         
         if not self._use_parametric:
             with open(f_emb, 'rb') as f:
                 self._embedder = pickle.load(f)
-
-        # read the atlas metadata.
-        self._metadata = scanpy.read(f_meta)
 
         if os.path.exists(f_expr) and use_expression_if_available:
             print(f'[*] loading the expression matrix into memory ...')
@@ -380,7 +383,8 @@ class reference:
         scvi_epoch_reduction = 3,
         retrain = False,
         landmark_reduction = 60,
-        landmark_loss_weight = 0.01
+        landmark_loss_weight = 0.01,
+        n_jobs = 1
     ):
         """
         Query the reference atlas with a dataset
@@ -452,6 +456,9 @@ class reference:
         landmark_loss_weight : float
             The weight of the landmark loss. By default 0.01.
 
+        n_jobs : int
+            Number of threads to use when running UMAP embedding.
+
         Returns
         -------
         anndata.AnnData
@@ -468,6 +475,8 @@ class reference:
         """
 
         import scvi
+
+        self._embedder.n_jobs = n_jobs
 
         assert query.var.index.is_unique
         assert query.obs.index.is_unique
@@ -542,7 +551,7 @@ class reference:
                 # set landmark loss weight and continue training our parametric umap model.
                 self._embedder.landmark_loss_weight = landmark_loss_weight # by default 1
                 self._embedder.fit(
-                    finetune, landmark_positions = landmarks
+                    finetune, landmarks = landmarks
                 )
 
                 print(f'[*] umap transforming in atlas latent space ...')
