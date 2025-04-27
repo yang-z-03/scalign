@@ -10,7 +10,7 @@ from sklearn.utils import check_random_state
 from pynndescent import NNDescent
 
 from umap import UMAP
-from umap.umap_ import fuzzy_simplicial_set, find_ab_params
+from umap.umap_ import fuzzy_simplicial_set, find_ab_params, spectral_layout, noisy_scale_coords
 import os
 import pickle
 
@@ -83,6 +83,19 @@ class umap_dataset(Dataset):
         edges_from_exp = self.data[self.edges_from_exp[index]]
         return (edges_to_exp, edges_from_exp)
 
+
+class layout_dataset(Dataset):
+
+    def __init__(self, data, embeddings):
+        self.embeddings = torch.Tensor(embeddings)
+        self.data = data
+
+    def __len__(self):
+        return int(self.data.shape[0])
+    
+    def __getitem__(self, index):
+        return self.data[index], self.embeddings[index]
+    
 
 class default_encoder(nn.Module):
     
@@ -180,6 +193,7 @@ def umap_loss(embedding_to, embedding_from, _a, _b, batch_size, negative_sample_
         probabilities_graph.cuda() if ACCEL == 'gpu' else probabilities_graph,
         probabilities_distance.cuda() if ACCEL == 'gpu' else probabilities_distance,
     )
+
     loss = torch.mean(ce_loss)
     return loss
 
@@ -230,7 +244,8 @@ class umap_model(pl.LightningModule):
         encoder: nn.Module, decoder = None,
         beta = 1.0, min_dist = 0.1,
         reconstruction_loss = F.binary_cross_entropy_with_logits,
-        landmark_data = None, landmark_embedding = None, landmark_weight = 0.01
+        landmark_data = None, landmark_embedding = None, landmark_weight = 0.01,
+        disable_umap_loss = False
     ):
         super().__init__()
         self.lr = lr
@@ -250,6 +265,7 @@ class umap_model(pl.LightningModule):
 
         self.reconstruction_loss = reconstruction_loss
         self._a, self._b = find_ab_params(1.0, min_dist)
+        self.disable_umap_loss = disable_umap_loss
 
 
     def configure_optimizers(self):
@@ -258,36 +274,53 @@ class umap_model(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
 
-        (edges_to_exp, edges_from_exp) = batch
-        embedding_to, embedding_from = \
-            self.encoder(edges_to_exp), \
-            self.encoder(edges_from_exp)
-
-        encoder_loss = umap_loss(
-            embedding_to,
-            embedding_from,
-            self._a,
-            self._b,
-            edges_to_exp.shape[0],
-            negative_sample_rate=5,
-        )
-
-        self.log("umap_loss", encoder_loss, prog_bar=True)
-
-        if self.use_landmark:
-            selection = torch.randint(0, self.landmark_data.shape[0], (edges_to_exp.shape[0],))
-            embedding_parametric = self.encoder(self.landmark_data[selection,:])
-            landmark_loss = mse_loss(embedding_parametric, self.landmark_embedding[selection,:])
-            self.log("landmark_loss", landmark_loss, prog_bar=True)
-            encoder_loss += self.landmark_weight * landmark_loss
-
-        if self.decoder:
-            recon = self.decoder(embedding_to)
-            recon_loss = self.reconstruction_loss(recon, edges_to_exp)
-            self.log("recon_loss", recon_loss, prog_bar=True)
-            return encoder_loss + self.beta * recon_loss
+        if not self.disable_umap_loss:
+            
+            (edges_to_exp, edges_from_exp) = batch
+            embedding_to, embedding_from = \
+                self.encoder(edges_to_exp), \
+                self.encoder(edges_from_exp)
         
-        else: return encoder_loss
+            encoder_loss = umap_loss(
+                embedding_to,
+                embedding_from,
+                self._a,
+                self._b,
+                edges_to_exp.shape[0],
+                negative_sample_rate = 5,
+            )
+
+            self.log("umap_loss", encoder_loss, prog_bar=True)
+
+            if self.use_landmark:
+                selection = torch.randint(0, self.landmark_data.shape[0], (edges_to_exp.shape[0],))
+                embedding_parametric = self.encoder(self.landmark_data[selection,:])
+                landmark_loss = mse_loss(embedding_parametric, self.landmark_embedding[selection,:])
+                self.log("landmark_loss", landmark_loss, prog_bar=True)
+                encoder_loss += self.landmark_weight * landmark_loss
+
+            if self.decoder:
+                recon = self.decoder(embedding_to)
+                recon_loss = self.reconstruction_loss(recon, edges_to_exp)
+                self.log("recon_loss", recon_loss, prog_bar=True)
+                return encoder_loss + self.beta * recon_loss
+
+            else: return encoder_loss
+        
+        else:
+
+            data, embedding = batch
+            embedding_parametric = self.encoder(data)
+            encoder_loss = mse_loss(embedding_parametric, embedding)
+            self.log("encoder_loss", encoder_loss, prog_bar = True)
+
+            if self.decoder:
+                recon = self.decoder(embedding_parametric)
+                recon_loss = self.reconstruction_loss(recon, data)
+                self.log("recon_loss", recon_loss, prog_bar = True)
+                return encoder_loss + self.beta * recon_loss
+            
+            else: return encoder_loss
 
 
 class data_module(pl.LightningDataModule):
@@ -331,7 +364,8 @@ class pumap:
         self.n_components = n_components
         self.beta = beta
         self.reconstruction_loss = reconstruction_loss
-        self.random_state = random_state
+        self.random_state = np.random.RandomState(random_state)
+        self.random_state_int = random_state
         self.lr = lr
         self.epochs = epochs
         self.n_nodes = n_nodes
@@ -347,8 +381,8 @@ class pumap:
             min_dist = self.min_dist,
             reconstruction_loss = self.reconstruction_loss,
         )
-
-    def fit(self, X, landmarks = None, landmark_weight = 0.05):
+    
+    def fit(self, X, init_pos = True):
 
         trainer = pl.Trainer(accelerator = ACCEL, devices = 'auto', max_epochs = self.epochs)
         encoder = (
@@ -362,75 +396,138 @@ class pumap:
         elif self.decoder == True:
             decoder = default_decoder(X.shape[1:], self.n_components)
 
-        if landmarks is None:
 
-            self.model = umap_model(
-                self.lr,
-                encoder,
-                decoder,
-                beta = self.beta,
-                min_dist = self.min_dist,
-                reconstruction_loss = self.reconstruction_loss,
-            )
+        graph = get_umap_graph(
+            X,
+            n_neighbors = self.n_neighbors,
+            metric = self.metric,
+            random_state = self.random_state,
+        )
 
-            graph = get_umap_graph(
+        if init_pos:
+            
+            embedding = spectral_layout(
                 X,
-                n_neighbors = self.n_neighbors,
-                metric = self.metric,
-                random_state = self.random_state,
+                graph,
+                self.n_components,
+                self.random_state,
+                metric = self.metric
             )
 
-            trainer.fit(
-                model = self.model,
-                datamodule = data_module(
-                    umap_dataset(X, graph), self.batch_size, self.num_workers
+            # add a little noise to avoid local minima for optimization to come
+            embedding = noisy_scale_coords(
+                embedding, self.random_state, max_coord = 10, noise = 0.0001
+            )
+
+            self.fit_layout(X, embedding)
+
+        self.model = umap_model(
+            self.lr,
+            encoder,
+            decoder,
+            beta = self.beta,
+            min_dist = self.min_dist,
+            reconstruction_loss = self.reconstruction_loss,
+        )
+
+        trainer.fit(
+            model = self.model,
+            datamodule = data_module(
+                umap_dataset(X, graph), self.batch_size, self.num_workers
+            ),
+        )
+
+    
+    def fit_layout(self, X, embeddings):
+
+        trainer = pl.Trainer(accelerator = ACCEL, devices = 'auto', max_epochs = self.epochs)
+        encoder = (
+            default_encoder(X.shape[1:], n_nodes = self.n_nodes, n_components = self.n_components)
+            if self.encoder is None
+            else self.encoder
+        )
+
+        if self.decoder is None or isinstance(self.decoder, nn.Module):
+            decoder = self.decoder
+        elif self.decoder == True:
+            decoder = default_decoder(X.shape[1:], self.n_components)
+
+        layout = umap_model(
+            self.lr,
+            encoder,
+            decoder,
+            beta = self.beta,
+            min_dist = self.min_dist,
+            reconstruction_loss = self.reconstruction_loss,
+            disable_umap_loss = True
+        )
+
+        trainer.fit(
+            model = layout,
+            datamodule = data_module(
+                layout_dataset(X, embeddings), self.batch_size, self.num_workers
+            ),
+        )
+    
+
+    def fit_with_landmark(self, X, landmarks = None, landmark_weight = 0.05):
+
+        trainer = pl.Trainer(accelerator = ACCEL, devices = 'auto', max_epochs = self.epochs)
+        encoder = (
+            default_encoder(X.shape[1:], n_nodes = self.n_nodes, n_components = self.n_components)
+            if self.encoder is None
+            else self.encoder
+        )
+
+        if self.decoder is None or isinstance(self.decoder, nn.Module):
+            decoder = self.decoder
+        elif self.decoder == True:
+            decoder = default_decoder(X.shape[1:], self.n_components)
+
+        not_landmark = np.isnan(np.sum(landmarks, axis = 1))
+        landmark_data = X[~ not_landmark, :]
+        landmark_embedding = landmarks[~ not_landmark, :]
+
+        self.model = umap_model(
+            self.lr, encoder, decoder,
+            beta = self.beta,
+            reconstruction_loss = self.reconstruction_loss,
+            landmark_data = landmark_data,
+            landmark_embedding = landmark_embedding,
+            landmark_weight = landmark_weight
+        )
+
+        graph = get_umap_graph(
+            X,
+            n_neighbors = self.n_neighbors,
+            metric = self.metric,
+            random_state = self.random_state,
+        )
+
+        trainer.fit(
+            model = self.model,
+            datamodule = data_module(
+                umap_dataset(
+                    X, graph, landmark_data = landmark_data, 
+                    landmark_embedding = landmark_embedding
                 ),
+                self.batch_size,
+                self.num_workers
             )
-
-        else:
-
-            not_landmark = np.isnan(np.sum(landmarks, axis = 1))
-            landmark_data = X[~ not_landmark, :]
-            landmark_embedding = landmarks[~ not_landmark, :]
-
-            self.model = umap_model(
-                self.lr, encoder, decoder,
-                beta = self.beta,
-                reconstruction_loss = self.reconstruction_loss,
-                landmark_data = landmark_data,
-                landmark_embedding = landmark_embedding,
-                landmark_weight = landmark_weight
-            )
-
-            graph = get_umap_graph(
-                X,
-                n_neighbors = self.n_neighbors,
-                metric = self.metric,
-                random_state = self.random_state,
-            )
-
-            trainer.fit(
-                model = self.model,
-                datamodule = data_module(
-                    umap_dataset(
-                        X, graph, landmark_data = landmark_data, 
-                        landmark_embedding = landmark_embedding
-                    ),
-                    self.batch_size,
-                    self.num_workers
-                )
-            )
+        )
 
     @torch.no_grad()
     def transform(self, X):
         x = torch.tensor(X, dtype = torch.float32)
-        # if ACCEL == 'gpu': x = x.cuda()
+        if ACCEL == 'gpu' and next(self.model.encoder.parameters()).is_cuda: 
+            x = x.cuda()
         return self.model.encoder(x).detach().cpu().numpy()
 
     @torch.no_grad()
     def inverse_transform(self, Z):
         x = torch.tensor(Z, dtype = torch.float32)
-        # if ACCEL == 'gpu': x = x.cuda()
+        if ACCEL == 'gpu' and next(self.model.encoder.parameters()).is_cuda: 
+            x = x.cuda()
         return self.model.decoder(x).detach().cpu().numpy()
 
     def save(self, path):
@@ -445,7 +542,7 @@ class pumap:
             'metric': self.metric, 
             'n_components': self.n_components, 
             'beta': self.beta,
-            'random_state': self.random_state, 
+            'random_state': self.random_state_int, 
             'n_nodes': self.n_nodes,
             'lr': self.lr, 
             'epochs': self.epochs, 
@@ -458,7 +555,7 @@ class pumap:
             pickle.dump(model_params, f)
 
 
-def load_pumap(path):
+def load_pumap(path, cpu_only = True):
     encoder = None
     decoder = None
     
@@ -466,21 +563,23 @@ def load_pumap(path):
         print('[*] reading encoder ...')
         encoder = torch.load(
             os.path.join(path, 'encoder.pt'), weights_only = False,
-            map_location = torch.device('cuda') if ACCEL == 'gpu' else torch.device('cpu')
+            map_location = torch.device('cuda') if ACCEL == 'gpu' and not cpu_only \
+                else torch.device('cpu')
         )
 
-        # if ACCEL == 'gpu': 
-        #     encoder = encoder.cuda()
+        if ACCEL == 'gpu' and not cpu_only: 
+            encoder = encoder.cuda()
 
     if os.path.exists(os.path.join(path, 'decoder.pt')):
         print('[*] reading decoder ...')
         decoder = torch.load(
             os.path.join(path, 'decoder.pt'), weights_only = False,
-            map_location = torch.device('cuda') if ACCEL == 'gpu' else torch.device('cpu')
+            map_location = torch.device('cuda') if ACCEL == 'gpu' and not cpu_only \
+                else torch.device('cpu')
         )
 
-        # if ACCEL == 'gpu': 
-        #     decoder = decoder.cuda()
+        if ACCEL == 'gpu' and not cpu_only: 
+            decoder = decoder.cuda()
 
     with open(os.path.join(path, 'configs.pkl'), 'rb') as f:
         params = pickle.load(f)

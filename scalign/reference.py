@@ -21,6 +21,7 @@ import matplotlib.patheffects as mpe
 from matplotlib.colors import ListedColormap as listedcm
 
 import torch
+from scalign.encoders import default_encoder
 
 # Set default font family to 'sans-serif'
 plt.rcParams['font.family'] = 'sans-serif'
@@ -124,7 +125,8 @@ class reference:
         self, path,
         key_atlas_var = '.ensembl',
         use_parametric_if_available = True,
-        use_expression_if_available = False
+        use_expression_if_available = False,
+        use_gpu_if_available = True
     ):
 
         import scanpy
@@ -137,7 +139,7 @@ class reference:
         
         f_scvi = os.path.join(path, 'scvi', 'model.pt')
         f_meta = os.path.join(path, 'metadata.h5ad')
-        f_emb = os.path.join(path, 'embedder.pkl')
+        f_emb = os.path.join(path, 'umap')
         f_param = os.path.join(path, 'parametric')
         f_expr = os.path.join(path, 'expression.h5ad')
 
@@ -177,7 +179,10 @@ class reference:
         if self._use_parametric:
             try:
                 from scalign.parametric import load_pumap
-                self._embedder = load_pumap(os.path.join(path, 'parametric'))
+                self._embedder = load_pumap(
+                    os.path.join(path, 'parametric'),
+                    cpu_only = not use_gpu_if_available
+                )
 
                 embeddings = np.load(os.path.join(path, 'parametric', 'embeddings.npy'))
                 self._metadata.obsm[self._metadata.uns['parametric']['precomputed']] = embeddings
@@ -193,8 +198,10 @@ class reference:
                     return
         
         if not self._use_parametric:
-            with open(f_emb, 'rb') as f:
+            with open(os.path.join(path, 'umap', 'embedder.pkl'), 'rb') as f:
                 self._embedder = pickle.load(f)
+            embeddings = np.load(os.path.join(path, 'umap', 'embeddings.npy'))
+            self._metadata.obsm[self._metadata.uns['umap']['precomputed']] = embeddings
 
         if os.path.exists(f_expr) and use_expression_if_available:
             print(f'[*] loading the expression matrix into memory ...')
@@ -288,6 +295,16 @@ class reference:
         Whether the atlas mapper load the expression matrix.
         """
         return self._has_expression
+
+
+    @property
+    def use_gpu(self):
+        """
+        Whether the atlas mapper load the expression matrix.
+        """
+        if self.use_parametric:
+            return next(self._embedder.model.encoder.parameters()).is_cuda
+        else: return False
     
 
     @property
@@ -346,7 +363,11 @@ class reference:
         if the model is loaded with non-parametric model.
         """
         if self.use_parametric:
-            self._embedder.parametric_model.summary()
+            try:
+                import torchinfo
+                torchinfo.summary(self._embedder.encoder)
+            except ImportError:
+                print('[!] summary needs torchinfo installed.')
         else: print('[!] the atlas embedder is non-parametric.')
 
     
@@ -370,12 +391,13 @@ class reference:
                 f'    [expression matrix loaded]: {self._has_expression}',
                 f'      [parametric model found]: {self._has_embedder_p}',
                 f'  [non-parametric model found]: {self._has_embedder_np}',
-                f'           [scvi latent space]: {self._metadata.uns["latent"]["latent"]}'
+                f'           [scvi latent space]: {self._metadata.uns["latent"]["latent"]}',
+                f'             [gpu accelerated]: {self.use_gpu}'
             ])
 
 
     def query(
-        self, query, 
+        self, input, 
         batch_key = None, 
         key_var = None,
         key_query_latent = 'scvi',
@@ -384,7 +406,7 @@ class reference:
         retrain = False,
         landmark_reduction = 60,
         landmark_loss_weight = 0.01,
-        n_jobs = 1
+        n_jobs = 1, n_epochs = 10
     ):
         """
         Query the reference atlas with a dataset
@@ -392,7 +414,7 @@ class reference:
         Parameters
         ----------
 
-        query : anndata.AnnData
+        input : anndata.AnnData
             The query dataset to be aligned. The variable identifier will be mapped to the reference
             atlas by the specified variable metadata column (in ``reference(key_atlas_var = ...)``).
             This column in the atlas metadata of genes will match the query dataset's metadata column
@@ -466,7 +488,7 @@ class reference:
             The modified anndata object. with the following slots set:
             
             * ``.obs``: ``batch``
-            * ``.var``: ``.index``, ``var_names``
+            * ``.var``: ``index``, ``var_names``
             * ``.obsm``: ``key_query_latent``, ``key_query_embeddings``
             * ``.uns``: ``.align``
 
@@ -475,8 +497,10 @@ class reference:
         """
 
         import scvi
+        import anndata
 
         self._embedder.n_jobs = n_jobs
+        query = anndata.AnnData(X = input.X.copy())
 
         assert query.var.index.is_unique
         assert query.obs.index.is_unique
@@ -484,19 +508,25 @@ class reference:
         # the scvi requires obs[batch] and var names to be .ugene.
         # so we transform to adapt to it.
         
-        query.var['.index'] = query.var_names.tolist()
+        query.var['index'] = query.var_names.tolist()
         if batch_key is not None:
-            assert batch_key in query.obs.keys()
-            query.obs['batch'] = query.obs[batch_key].tolist()
+            assert batch_key in input.obs.keys()
+            query.obs['batch'] = input.obs[batch_key].tolist()
         else: 
             print(f'[!] do not supply the batch key. assume they all came from the same batch.')
             query.obs['batch'] = 'whole'
             
         if key_var is not None:
-            assert key_var in query.var.keys()
-            qkey = query.var[key_var].tolist()
-        else: qkey = query.var_names.tolist()
-        qindex = query.var_names.tolist()
+            assert key_var in input.var.keys()
+            qkey = input.var[key_var].tolist()
+        else: qkey = input.var_names.tolist()
+        qindex = input.var_names.tolist()
+
+        if key_query_latent in input.obsm.keys():
+            query.obsm[key_query_latent] = input.obsm[key_query_latent].copy()
+        
+        if key_query_embeddings in input.obsm.keys():
+            query.obsm[key_query_embeddings] = input.obsm[key_query_embeddings].copy()
 
         qconv = []
         n_nan = 0
@@ -549,9 +579,9 @@ class reference:
                 )
                 
                 # set landmark loss weight and continue training our parametric umap model.
-                self._embedder.landmark_loss_weight = landmark_loss_weight # by default 1
-                self._embedder.fit(
-                    finetune, landmarks = landmarks
+                self._embedder.epochs = n_epochs
+                self._embedder.fit_with_landmark(
+                    finetune, landmarks = landmarks, landmark_weight = landmark_loss_weight
                 )
 
                 print(f'[*] umap transforming in atlas latent space ...')
@@ -602,6 +632,7 @@ class reference:
         # atlas
         atlas_ptsize = 2,
 
+        atlas_embedding = None,
         atlas_color_mode = 'categorical',
         key_atlas_var = '.name',
         atlas_gene = None,
@@ -798,8 +829,9 @@ class reference:
         # column of observation metadata.
         
         do_parametric = query.uns['.align']['parametric']
-        slot = self._metadata.uns['parametric']['precomputed'] if do_parametric else \
-            self._metadata.uns['umap']['precomputed']
+        slot = (self._metadata.uns['parametric']['precomputed'] if do_parametric else \
+            self._metadata.uns['umap']['precomputed']) if atlas_embedding is None else \
+            atlas_embedding
         umap_x = self._metadata.obsm[slot][:,0]
         umap_y = self._metadata.obsm[slot][:,1]
         
@@ -826,8 +858,8 @@ class reference:
         ahue = None
         ahue_order = None
         if atlas_hue is not None and atlas_color_mode == 'categorical':
-            ahue = self._metadata.obs[query_hue].tolist()
-            ahue_order = self._metadata.obs[query_hue].value_counts().index.tolist() \
+            ahue = self._metadata.obs[atlas_hue].tolist()
+            ahue_order = self._metadata.obs[atlas_hue].value_counts().index.tolist() \
                 if atlas_hue_order is None else atlas_hue_order
         
         aexpr = None
@@ -973,7 +1005,7 @@ class reference:
                 legend_order, legend_colors, range(len(legend_order))
             ):
                 # calculate gravity for legend_t class.
-                selection = [x == legend_t for x in hue]
+                selection = [x == legend_t for x in (hue if do_annotate == 'query' else ahue)]
                 xs = annot_x[selection]
                 ys = annot_y[selection]
                 center = np.mean(xs), np.mean(ys)
@@ -1012,3 +1044,201 @@ class reference:
         else: 
             plt.show()
             return fig
+
+
+def make_reference(
+    atlas,
+    var_index = None,
+    key_counts = None,
+    key_batch = None,
+    batch_cell_filter = 5,
+    taxon = 'mmu',
+
+    # scvi model settings
+    scvi_n_epoch = None,
+    scvi_n_latent = 10,
+    scvi_n_hidden = 128,
+    scvi_n_layers = 1,
+    scvi_dropout_rate = 0.1,
+    scvi_dispersion = 'gene',
+    scvi_gene_likelihood = 'zinb',
+    scvi_latent_distrib = 'normal',
+
+    build_umap = True,
+    umap_nn = 25,
+    umap_metrics = 'euclidean',
+    umap_min_dist = 0.1,
+    umap_init = 'spectral',
+
+    build_parametric = False,
+    parametric_encoder = default_encoder,
+    save = 'reference'
+):
+    
+    if os.path.exists(save):
+        print(f'[e] the save folder already exist! specify another one.')
+        return None
+    else: os.makedirs(save)
+
+    # extract count matrix.
+    import anndata
+    counts = anndata.AnnData(
+        X = atlas.layers[key_counts] \
+            if key_counts is not None else atlas.X
+    )
+
+    counts.obs['batch'] = atlas.obs[key_batch].tolist() \
+        if key_batch in atlas.obs.keys() else '_whole'
+    counts.var_names = atlas.var[var_index].tolist() \
+        if var_index in atlas.var.keys() else atlas.var_names.tolist()
+
+    # extract metadata file.
+    import scipy.sparse as sparse
+    n_cells, n_genes = counts.X.shape
+    metadata = anndata.AnnData(
+        X = sparse.csr_matrix((n_cells, n_genes), dtype = np.float32),
+        obs = atlas.obs, var = atlas.var
+    )
+
+    metadata.var_names = atlas.var[var_index].tolist() \
+        if var_index in atlas.var.keys() else atlas.var_names.tolist()
+    metadata.var['.index'] = metadata.var_names.tolist()
+    metadata.write_h5ad(os.path.join(save, 'metadata.h5ad'))
+
+    # build scvi model
+    import scvi
+    
+    # we will remove all data with < batch_cell_filter cell detection.
+    mapping = {}
+    names = counts.obs['batch'].value_counts().index.tolist()
+    values = counts.obs['batch'].value_counts().tolist()
+    n_outlier_sample = 0
+    for n, v in zip(names, values):
+        if v > batch_cell_filter: mapping[n] = n
+        else: 
+            mapping[n] = 'outliers'
+            n_outlier_sample += 1
+    
+    print(f'[!] {n_outlier_sample} samples is removed due to small sample size.')
+    batch = counts.obs['batch'].tolist()
+    for i in range(len(batch)):
+        batch[i] = mapping[batch[i]]
+    counts.obs['batch'] = batch
+
+    scvi.model.SCVI.setup_anndata(counts, batch_key = 'batch')
+    model = scvi.model.SCVI(
+        counts, 
+        n_hidden = scvi_n_hidden, 
+        n_latent = scvi_n_latent, 
+        n_layers = scvi_n_layers,
+        dropout_rate = scvi_dropout_rate,
+        dispersion = scvi_dispersion,
+        gene_likelihood = scvi_gene_likelihood,
+        latent_distribution = scvi_latent_distrib
+    )
+
+    print('[*] scvi model config: \n')
+    print(model)
+    print()
+
+    max_epochs_scvi = np.min([round((20000 / counts.n_obs) * 400), 400]) \
+        if scvi_n_epoch is None else scvi_n_epoch
+    print(f'[*] will train {max_epochs_scvi} epochs.')
+    model.train(max_epochs = int(max_epochs_scvi), early_stopping = True)
+    scvi_pc = model.get_latent_representation()
+    model.save(os.path.join(save, 'scvi'))
+
+    metadata.obsm['scvi.ref'] = scvi_pc
+    metadata.uns['latent'] = {
+        'batch': 'batch',
+        'latent': scvi_n_latent,
+        'precomputed': 'scvi.ref',
+        'variable': '.index'
+    }
+
+    landmark = np.arange(n_cells, dtype = np.int64)
+    np.random.shuffle(landmark)
+    metadata.uns['landmark'] = landmark
+
+    if build_umap:
+
+        from umap import UMAP
+        embedder = UMAP(
+            n_components = 2, n_neighbors = umap_nn, metric = umap_metrics,
+            init = umap_init, min_dist = umap_min_dist, random_state = 42
+        )
+
+        emb = embedder.fit_transform(scvi_pc)
+
+        metadata.uns['umap'] = {
+            'dimension': 2,
+            'latent': scvi_n_latent,
+            'precomputed': 'umap'
+        }
+
+        os.makedirs(os.path.join(save, 'umap'))
+        np.save(os.path.join(save, 'umap', 'embeddings.npy'), emb)
+
+        import pickle
+        with open(os.path.join(save, 'umap', 'embedder.pkl'), 'wb') as f:
+            pickle.dump(embedder, f)
+
+    if build_parametric:
+
+        pass
+
+    metadata.write_h5ad(os.path.join(save, 'metadata.h5ad'))
+    pass
+
+
+def rebuild_umap_embedder(
+    ref_path,              
+    umap_nn = 25,
+    umap_metrics = 'euclidean',
+    umap_min_dist = 0.1,
+    umap_init = 'spectral',
+):
+    
+    from umap import UMAP
+    embedder = UMAP(
+        n_components = 2, n_neighbors = umap_nn, metric = umap_metrics,
+        init = umap_init, min_dist = umap_min_dist, random_state = 42
+    )
+
+    import scanpy
+    metadata = scanpy.read(os.path.join(ref_path, 'metadata.h5ad'))
+    emb = embedder.fit_transform(metadata.obsm[metadata.uns['latent']['precomputed']])
+    metadata.uns['umap'] = {
+        'dimension': 2,
+        'latent': metadata.uns['latent']['latent'],
+        'precomputed': 'umap'
+    }
+
+    os.makedirs(os.path.join(ref_path, 'umap'), exist_ok = True)
+    np.save(os.path.join(ref_path, 'umap', 'embeddings.npy'), emb)
+
+    import pickle
+    with open(os.path.join(ref_path, 'umap', 'embedder.pkl'), 'wb') as f:
+        pickle.dump(embedder, f)
+
+    metadata.write_h5ad(os.path.join(ref_path, 'metadata.h5ad'))
+
+    pass
+
+
+def rebuild_expression(ref_path, atlas, layer = 'logcounts'):
+
+    import scanpy
+    metadata = scanpy.read(os.path.join(ref_path, 'metadata.h5ad'))
+    assert metadata.n_obs == atlas.n_obs
+    assert metadata.n_vars == atlas.n_vars
+
+    import anndata
+    import scipy.sparse as sp
+    expr = atlas.layers['layer'] if layer is not None else atlas.X
+    if not isinstance(expr, sp.csc_matrix):
+        expr = sp.csc_matrix(expr)
+    
+    data = anndata.AnnData(X = expr)
+    data.write_h5ad(os.path.join(ref_path, 'expression.h5ad'))
+

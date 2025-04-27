@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name                 = 'scalign',
-    version              = '0.2.1',
+    version              = '0.2.3',
     description          = 'align query dataset to reference atlases.',
     author               = 'Zheng Yang',
     author_email         = 'xornent@outlook.com',
